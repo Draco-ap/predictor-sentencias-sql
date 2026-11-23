@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Predictor de sentencias SQL</title>
+<style>
+:root{--bg:#fff;--fg:#1a1a1a;--mut:#666;--bd:#c8c8c8;--bt:#f1f1f1;--pn:#f4f5f7;--ac:#2b5fc7;--acf:#fff;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#1b1b1b;--fg:#e8e8e8;--mut:#9a9a9a;--bd:#444;--bt:#2a2a2a;--pn:#141414;--ac:#7aa7ff;--acf:#10203f;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#1b1b1b;--fg:#e8e8e8;--mut:#9a9a9a;--bd:#444;--bt:#2a2a2a;--pn:#141414;--ac:#7aa7ff;--acf:#10203f;color-scheme:dark}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--pn);color:var(--fg);font:16px/1.5 system-ui,sans-serif}
+main{max-width:760px;margin:0 auto;padding:28px 16px 40px}
+h1{font-size:1.4rem;margin:0 0 4px}
+p,small{color:var(--mut)}
+textarea{width:100%;box-sizing:border-box;min-height:130px;padding:12px;border:1px solid var(--bd);border-radius:6px;background:var(--bg);color:var(--fg);font:15px/1.5 ui-monospace,Consolas,monospace;resize:vertical}
+h2{font-size:.95rem;margin:0 0 8px}
+button{font:inherit;padding:5px 12px;margin:0 6px 0 0;border:1px solid var(--bd);border-radius:6px;background:var(--bt);color:var(--fg);cursor:pointer}
+button:focus-visible,textarea:focus-visible{outline:2px solid var(--fg);outline-offset:1px}
+.card{background:var(--bg);border:1px solid var(--bd);border-radius:8px;padding:16px;margin-top:16px}
+h2 small{font-weight:400}
+.starts{margin-top:10px;font-size:.9rem;color:var(--mut)}
+.starts button{padding:2px 10px;font-size:.85rem}
+#sug{display:flex;flex-wrap:wrap;gap:6px}
+#sug button{margin:0;border-radius:999px}
+#sug button:first-child{border-color:var(--ac);color:var(--ac)}
+.pc{margin-left:6px;font-size:.8rem;color:var(--mut)}
+button:hover{border-color:var(--ac)}
+</style>
+</head>
+<body>
+<main>
+<h1>Predictor de sentencias SQL</h1>
+<p>Escribe el inicio de una sentencia sobre <b>clientes</b> o <b>pedidos</b> y el programa predice cómo continúa.</p>
+
+<div class="card">
+<h2>Tu sentencia</h2>
+<textarea id="sql" spellcheck="false" placeholder="SELECT nombre FROM clientes WHERE ..."></textarea>
+<div class="starts">Empezar con:
+<button type="button">SELECT</button><button type="button">INSERT</button><button type="button">UPDATE</button><button type="button">DELETE</button></div>
+</div>
+
+<div class="card">
+<h2>Siguiente palabra <small>(Tab acepta la primera)</small></h2>
+<div id="sug"></div>
+</div>
+
+
+
+
+</main>
+
+<script>
+const COLS={
+ clientes:['id_cliente','nombre','apellido','email','ciudad','telefono','estado_cuenta','fecha_registro'],
+ pedidos:['id_pedido','id_cliente','fecha_pedido','monto_total','metodo_pago','estatus','cantidad_productos']
+};
+const ALLCOLS=new Set([...COLS.clientes,...COLS.pedidos]);
+const KW=new Set(['select','from','where','insert','into','values','update','set','delete','inner','join','on','and','or']);
+
+/* ---------- Corpus de entrenamiento ---------- */
+const L=s=>s.trim().split('\n');
+const IC='insert into clientes (id_cliente, nombre, apellido, email, ciudad, telefono, estado_cuenta, fecha_registro) values ';
+const IP='insert into pedidos (id_pedido, id_cliente, fecha_pedido, monto_total, metodo_pago, estatus, cantidad_productos) values ';
+const J=' from clientes c inner join pedidos p on c.id_cliente = p.id_cliente where ';
+const del=(t,s)=>L(s).map(c=>'delete from '+t+' where '+c);
+const upd=(t,s)=>L(s).map(l=>{const[a,b]=l.split('|');return 'update '+t+' set '+a+' where '+b});
+
+const CORPUS=[
+IC+"(1, 'Carlos', 'Mendoza', 'carlos.mendoza@email.com', 'Madrid', '+34612345678', 'activo', '2024-01-15')",
+IC+"(2, 'Ana', 'García', 'ana.garcia@email.com', 'Barcelona', '+34622345679', 'activo', '2024-02-10')",
+IC+"(3, 'Luis', 'Hernández', 'luis.h@email.com', 'Valencia', '+34632345680', 'inactivo', '2023-11-05')",
+IP+"(101, 1, '2024-03-01', 150.50, 'tarjeta', 'entregado', 3)",
+IP+"(102, 2, '2024-03-02', 89.99, 'paypal', 'enviado', 1)",
+IP+"(103, 1, '2024-03-05', 320.00, 'transferencia', 'procesando', 5)",
+...L(`
+select nombre, apellido from clientes where ciudad = 'Madrid'
+select * from clientes where estado_cuenta = 'activo'
+select email from clientes where id_cliente = 5
+select nombre, telefono from clientes where apellido = 'García'
+select * from clientes where fecha_registro = '2024-01-15'
+select ciudad from clientes where id_cliente = 12
+select nombre, email from clientes where estado_cuenta = 'suspendido'
+select apellido from clientes where ciudad = 'Barcelona'
+select * from clientes where id_cliente = 20
+select telefono from clientes where email = 'carlos.mendoza@email.com'
+select nombre, ciudad from clientes where estado_cuenta = 'inactivo'
+select id_cliente, email from clientes where nombre = 'Sofia'
+select * from clientes where ciudad = 'Sevilla'
+select nombre, apellido, telefono from clientes where id_cliente = 8
+select estado_cuenta from clientes where email = 'dortiz@email.com'
+select * from pedidos where estatus = 'entregado'
+select monto_total from pedidos where id_pedido = 101
+select fecha_pedido, monto_total from pedidos where id_cliente = 2
+select * from pedidos where metodo_pago = 'paypal'
+select id_pedido, estatus from pedidos where monto_total = 150.50
+select cantidad_productos from pedidos where id_pedido = 107
+select * from pedidos where fecha_pedido = '2024-03-01'
+select id_cliente from pedidos where estatus = 'cancelado'
+select monto_total, metodo_pago from pedidos where id_pedido = 110
+select * from pedidos where cantidad_productos = 1
+select id_pedido from pedidos where estatus = 'procesando'
+select fecha_pedido from pedidos where id_pedido = 115
+select * from pedidos where metodo_pago = 'transferencia'
+select monto_total from pedidos where estatus = 'enviado'
+select id_pedido, cantidad_productos from pedidos where id_cliente = 15
+`),
+...L(`
+c.nombre, c.apellido, p.monto_total|p.estatus = 'entregado'
+c.email, p.id_pedido, p.fecha_pedido|c.ciudad = 'Madrid'
+c.nombre, p.metodo_pago|p.id_pedido = 103
+c.ciudad, p.monto_total|p.metodo_pago = 'paypal'
+c.nombre, c.telefono, p.estatus|c.estado_cuenta = 'activo'
+c.apellido, p.cantidad_productos|p.monto_total = 990.00
+p.id_pedido, c.email|p.estatus = 'procesando'
+c.nombre, p.fecha_pedido|c.id_cliente = 4
+c.ciudad, p.estatus|p.id_pedido = 112
+c.nombre, c.apellido, p.monto_total|c.ciudad = 'Barcelona'
+p.id_pedido, p.monto_total, c.telefono|p.metodo_pago = 'efectivo'
+c.email, p.estatus|p.fecha_pedido = '2024-03-15'
+c.nombre, p.cantidad_productos|c.estado_cuenta = 'suspendido'
+p.id_pedido, c.nombre, c.ciudad|p.estatus = 'cancelado'
+c.telefono, p.monto_total|p.id_pedido = 120
+c.nombre, c.apellido|p.metodo_pago = 'transferencia'
+c.email, p.monto_total, p.estatus|c.id_cliente = 9
+c.ciudad, p.fecha_pedido|p.cantidad_productos = 10
+c.nombre, p.id_pedido|c.ciudad = 'Valencia'
+c.apellido, p.metodo_pago|p.estatus = 'enviado'
+`).map(l=>{const[a,b]=l.split('|');return 'select '+a+J+b}),
+...del('clientes',`
+id_cliente = 3
+email = 'luis.h@email.com'
+estado_cuenta = 'inactivo'
+ciudad = 'Zaragoza'
+telefono = '+34652345682'
+id_cliente = 5
+nombre = 'Javier'
+apellido = 'López'
+estado_cuenta = 'suspendido'
+email = 'elena.perez@email.com'
+id_cliente = 8
+ciudad = 'Palma'
+fecha_registro = '2023-08-22'
+id_cliente = 11
+email = 'mateo.d@email.com'
+ciudad = 'Córdoba'
+id_cliente = 14
+email = 'carmen.v@email.com'
+ciudad = 'Gijón'
+id_cliente = 17
+email = 'dortiz@email.com'
+ciudad = 'La Coruña'
+id_cliente = 20
+email = 'albanu@email.com'
+ciudad = 'Terrassa'
+`),
+...del('pedidos',`
+id_pedido = 105
+estatus = 'cancelado'
+id_cliente = 6
+monto_total = 210.10
+id_pedido = 115
+id_cliente = 21
+monto_total = 134.00
+id_pedido = 123
+id_cliente = 12
+monto_total = 27.50
+id_pedido = 101
+fecha_pedido = '2024-03-01'
+metodo_pago = 'efectivo'
+id_pedido = 108
+monto_total = 12.50
+id_pedido = 112
+cantidad_productos = 12
+id_pedido = 117
+fecha_pedido = '2024-03-23'
+id_pedido = 118
+monto_total = 44.00
+id_pedido = 121
+fecha_pedido = '2024-03-28'
+id_pedido = 122
+cantidad_productos = 8
+`),
+...upd('clientes',`
+estado_cuenta = 'inactivo'|id_cliente = 1
+ciudad = 'Madrid'|email = 'ana.garcia@email.com'
+telefono = '+34600000000'|id_cliente = 2
+email = 'nuevo.luis@email.com'|id_cliente = 3
+estado_cuenta = 'suspendido'|ciudad = 'Sevilla'
+apellido = 'Martínez-Gómez'|id_cliente = 6
+ciudad = 'Alicante'|id_cliente = 7
+estado_cuenta = 'activo'|email = 'elena.perez@email.com'
+telefono = '+34699999999'|id_cliente = 9
+nombre = 'Lucía María'|id_cliente = 10
+estado_cuenta = 'activo'|id_cliente = 11
+ciudad = 'Bilbao'|id_cliente = 12
+email = 'adrian.ramirez@email.com'|id_cliente = 13
+estado_cuenta = 'activo'|id_cliente = 14
+apellido = 'Castro-Ruiz'|id_cliente = 15
+telefono = '+34666000111'|id_cliente = 16
+estado_cuenta = 'activo'|id_cliente = 17
+ciudad = 'Valencia'|id_cliente = 18
+email = 'david.rubio.new@email.com'|id_cliente = 19
+estado_cuenta = 'activo'|id_cliente = 20
+telefono = '+34612000000'|id_cliente = 21
+ciudad = 'Gijón'|id_cliente = 22
+estado_cuenta = 'inactivo'|id_cliente = 23
+estado_cuenta = 'activo'|id_cliente = 24
+email = 'andres.castillo@email.com'|id_cliente = 25
+`),
+...upd('pedidos',`
+estatus = 'enviado'|id_pedido = 103
+monto_total = 50.00|id_pedido = 104
+metodo_pago = 'tarjeta'|id_pedido = 107
+estatus = 'entregado'|id_pedido = 109
+cantidad_productos = 3|id_pedido = 110
+estatus = 'procesando'|id_pedido = 111
+metodo_pago = 'paypal'|id_pedido = 113
+estatus = 'enviado'|id_pedido = 114
+monto_total = 95.00|id_pedido = 116
+estatus = 'enviado'|id_pedido = 119
+cantidad_productos = 6|id_pedido = 120
+metodo_pago = 'transferencia'|id_pedido = 124
+estatus = 'entregado'|id_pedido = 125
+monto_total = 160.00|id_pedido = 101
+estatus = 'entregado'|id_pedido = 102
+metodo_pago = 'efectivo'|id_pedido = 106
+cantidad_productos = 2|id_pedido = 108
+monto_total = 30.00|id_pedido = 112
+estatus = 'procesando'|id_pedido = 116
+cantidad_productos = 15|id_pedido = 117
+metodo_pago = 'tarjeta'|id_pedido = 118
+monto_total = 210.00|id_pedido = 119
+estatus = 'cancelado'|id_pedido = 121
+monto_total = 150.00|id_pedido = 122
+cantidad_productos = 9|id_pedido = 124
+`)
+];
+
+/* ---------- Modelo de n-gramas (contexto de hasta 4 palabras) ---------- */
+const TOK=/'[^']*'?|\d+(?:\.\d+)?|[A-Za-zÀ-ÿ_]\w*|[^\s\w]/g;
+const lower=t=>t[0]==="'"?t:t.toLowerCase();
+const tokenize=s=>(s.match(TOK)||[]).map(lower);
+const N=4,M=[];
+for(let k=1;k<=N;k++)M[k]=new Map();
+for(const s of CORPUS){
+  const t=['<s>',...tokenize(s),';'];
+  for(let i=1;i<t.length;i++)for(let k=1;k<=N&&k<=i;k++){
+    const key=t.slice(i-k,i).join('\x01');
+    let m=M[k].get(key);if(!m)M[k].set(key,m=new Map());
+    m.set(t[i],(m.get(t[i])||0)+1);
+  }
+}
+
+/* ---------- Predicción ---------- */
+function parse(text){
+  const all=tokenize(text);
+  let cur=all.slice(all.lastIndexOf(';')+1),prefix='';
+  if(!/\s$/.test(text)&&cur.length){
+    const l=cur[cur.length-1];
+    if(/^['\w]/.test(l)&&!(l.length>1&&l.endsWith("'"))){prefix=l;cur=cur.slice(0,-1);}
+  }
+  return{cur,prefix};
+}
+function schema(cur){
+  const al={},tabs=[];
+  cur.forEach((t,i)=>{
+    if(['from','join','into','update'].includes(t)&&COLS[cur[i+1]]){
+      tabs.push(cur[i+1]);
+      const a=cur[i+2];
+      if(a&&/^[a-z_]\w*$/.test(a)&&!KW.has(a)&&!COLS[a])al[a]=cur[i+1];
+    }
+  });
+  return{al,tabs};
+}
+function predict(text){
+  const{cur,prefix}=parse(text),{al,tabs}=schema(cur);
+  const ctx=['<s>',...cur],sc=new Map();
+  for(let k=1;k<=N&&k<=ctx.length;k++){
+    const m=M[k].get(ctx.slice(-k).join('\x01'));
+    if(!m)continue;
+    let tot=0;m.forEach(v=>tot+=v);
+    m.forEach((v,w)=>sc.set(w,(sc.get(w)||0)+v/tot*Math.pow(4,k)));
+  }
+  const prev=cur[cur.length-1],before=cur[cur.length-2];
+  let allow=null;
+  if(prev==='.'){
+    const tb=al[before]||(COLS[before]?before:{c:'clientes',p:'pedidos'}[before]);
+    if(tb){allow=COLS[tb];allow.forEach(c=>sc.has(c)||sc.set(c,0.01));}
+  }
+  for(const w of[...sc.keys()]){
+    const isCol=ALLCOLS.has(w);
+    let drop=false;
+    if(prev==='.')drop=allow?!allow.includes(w):!isCol;
+    else if(isCol&&tabs.length&&!tabs.some(t=>COLS[t].includes(w)))drop=true;
+    if(prefix&&!w.toLowerCase().startsWith(prefix.toLowerCase()))drop=true;
+    if(w==='<s>')drop=true;
+    if(drop)sc.delete(w);
+  }
+  let sum=0;sc.forEach(v=>sum+=v);
+  const list=[...sc].sort((a,b)=>b[1]-a[1]).slice(0,8).map(([w,v])=>[w,v/sum*100]);
+  return{prefix,list};
+}
+
+/* ---------- Formato e inserción ---------- */
+function isUpper(text){
+  const ws=(text.match(/[A-Za-z]+/g)||[]).filter(w=>KW.has(w.toLowerCase()));
+  return ws.length?ws[ws.length-1]===ws[ws.length-1].toUpperCase():true;
+}
+const fmt=(w,up)=>up&&KW.has(w)?w.toUpperCase():w;
+function apply(text,prefix,w,up){
+  let base=text.slice(0,text.length-prefix.length);
+  const t=fmt(w,up);
+  if(/^[,.;)]$/.test(t))base=base.replace(/\s+$/,'');
+  else if(base&&!/[\s(.]$/.test(base))base+=' ';
+  return base+t+(/^[.(]$/.test(t)?'':' ');
+}
+function complete(text){
+  let t=text;const up=isUpper(text);
+  for(let i=0;i<40;i++){
+    const{prefix,list}=predict(t);
+    if(!list.length)break;
+    const w=list[0][0];
+    t=apply(t,prefix,w,up);
+    if(w===';')break;
+  }
+  return t.trim();
+}
+
+/* ---------- Interfaz ---------- */
+const ta=document.getElementById('sql'),sug=document.getElementById('sug');
+const head=()=>ta.value.slice(0,ta.selectionStart),tail=()=>ta.value.slice(ta.selectionStart);
+function setText(newHead,rest){
+  ta.value=newHead+rest;
+  ta.selectionStart=ta.selectionEnd=newHead.length;
+  ta.focus();render();
+}
+function render(){
+  const text=head(),up=isUpper(text),{prefix,list}=predict(text);
+  sug.innerHTML='';
+  if(!list.length)sug.textContent='Sin sugerencias para este contexto.';
+  list.forEach(([w,p])=>{
+    const b=document.createElement('button');
+    b.type='button';
+    b.textContent=fmt(w,up);
+    const s=document.createElement('span');s.className='pc';s.textContent=Math.round(p)+'%';b.appendChild(s);
+    b.onclick=()=>setText(apply(text,prefix,w,up),tail());
+    sug.appendChild(b);
+  });
+}
+ta.addEventListener('input',render);
+ta.addEventListener('click',render);
+ta.addEventListener('keyup',e=>{if(e.key.startsWith('Arrow'))render();});
+ta.addEventListener('keydown',e=>{
+  if(e.key==='Tab'&&!e.shiftKey){
+    const text=head(),{prefix,list}=predict(text);
+    if(list.length){e.preventDefault();setText(apply(text,prefix,list[0][0],isUpper(text)),tail());}
+  }
+});
+document.querySelectorAll('.starts button').forEach(b=>b.onclick=()=>setText(b.textContent+' ',''));
+render();
+</script>
+</body>
+</html>
